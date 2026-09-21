@@ -36,7 +36,7 @@
   </header>
   <div class="controls">
     <button id="groupTrigger" class="select-btn" onclick="openGroupModal()">Выберите группу</button>
-    <button class="action-btn" onclick="forceRefresh()">Обновить</button>
+    <button class="action-btn" onclick="forceRefresh()">Загрузить и скачать .xlsx</button>
   </div>
   <div id="groupModal" class="modal">
     <div class="modal-content">
@@ -50,21 +50,22 @@
   <div id="scheduleContainer" class="container"></div>
 
   <script>
-    const CORS_PROXY = "https://api.corsproxy.io/?url=";
     const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
     const DAY_MAP = { 'пн': 'Понедельник', 'вт': 'Вторник', 'ср': 'Среда', 'чт': 'Четверг', 'пт': 'Пятница' };
 
     let parsedSchedule = {};
     let selectedGroup = localStorage.getItem('phystech_selected_group') || '';
 
-    // Динамическая генерация URL на основе текущей даты (DD.MM)
     function buildDynamicScheduleUrl(dateObj = new Date()) {
       const day = String(dateObj.getDate()).padStart(2, '0');
       const month = String(dateObj.getMonth() + 1).padStart(2, '0');
       const year = dateObj.getFullYear();
       
       const fileName = `${day}.${month}.-Структурное-подразделение-№1.xlsx`;
-      return `https://phystech.pro/wp-content/uploads/${year}/${month}/${encodeURIComponent(fileName)}`;
+      return {
+        fileName,
+        url: `https://phystech.pro/wp-content/uploads/${year}/${month}/${encodeURIComponent(fileName)}`
+      };
     }
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -90,12 +91,11 @@
     }
 
     async function forceRefresh() {
-      await fetchScheduleLocally();
+      await fetchScheduleLocally(true);
     }
 
-    // Пробует сначала текущий день, а при 404 скачивает файл за предыдущие дни (fallback до 5 дней назад)
-    async function fetchScheduleLocally() {
-      updateStatus("Скачивание актуального файла...");
+    async function fetchScheduleLocally(triggerDownload = false) {
+      updateStatus("Поиск актуального файла...");
       
       let success = false;
       const today = new Date();
@@ -104,13 +104,29 @@
         const targetDate = new Date(today);
         targetDate.setDate(today.getDate() - offset);
         
-        const fileUrl = buildDynamicScheduleUrl(targetDate);
-        const proxyUrl = CORS_PROXY + encodeURIComponent(fileUrl) + `&_t=${Date.now()}`;
+        const { fileName, url } = buildDynamicScheduleUrl(targetDate);
+        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
 
         try {
+          updateStatus(`Проверка за ${targetDate.getDate()}.${targetDate.getMonth() + 1}...`);
           const res = await fetch(proxyUrl);
+          
           if (res.ok) {
             const blob = await res.blob();
+            
+            // Если вызвано пользователем вручную или загружается свежий файл — скачиваем файл на устройство
+            if (triggerDownload) {
+              const downloadUrl = window.URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.style.display = 'none';
+              a.href = downloadUrl;
+              a.download = fileName;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              window.URL.revokeObjectURL(downloadUrl);
+            }
+
             await new Promise((resolve) => {
               const reader = new FileReader();
               reader.onload = function(e) {
@@ -125,16 +141,17 @@
               };
               reader.readAsDataURL(blob);
             });
+            
             success = true;
             break;
           }
         } catch(err) {
-          // Игнорируем ошибку и пробуем предыдущую дату
+          // Пробуем следующую прошлую дату
         }
       }
 
       if (!success) {
-        updateStatus("Ошибка сети, загрузка из памяти");
+        updateStatus("Ошибка сети, загрузка из кэша");
         const cached = localStorage.getItem('phystech_schedule_base64');
         if (cached) parseBase64Data(cached);
         else renderEmpty("Не удалось найти актуальный файл расписания.");
