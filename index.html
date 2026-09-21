@@ -50,13 +50,22 @@
   <div id="scheduleContainer" class="container"></div>
 
   <script>
-    const SCHEDULE_FILE_URL = "https://phystech.pro/wp-content/uploads/2026/09/21.09.-%D0%A1%D1%82%D1%80%D1%83%D0%BA%D1%82%D1%83%D1%80%D0%BD%D0%BE%D0%B5-%D0%BF%D0%BE%D0%B4%D1%80%D0%B0%D0%B7%D0%B4%D0%B5%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5-%E2%84%961.xlsx";
     const CORS_PROXY = "https://api.corsproxy.io/?url=";
     const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
     const DAY_MAP = { 'пн': 'Понедельник', 'вт': 'Вторник', 'ср': 'Среда', 'чт': 'Четверг', 'пт': 'Пятница' };
 
     let parsedSchedule = {};
     let selectedGroup = localStorage.getItem('phystech_selected_group') || '';
+
+    // Динамическая генерация URL на основе текущей даты (DD.MM)
+    function buildDynamicScheduleUrl(dateObj = new Date()) {
+      const day = String(dateObj.getDate()).padStart(2, '0');
+      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const year = dateObj.getFullYear();
+      
+      const fileName = `${day}.${month}.-Структурное-подразделение-№1.xlsx`;
+      return `https://phystech.pro/wp-content/uploads/${year}/${month}/${encodeURIComponent(fileName)}`;
+    }
 
     document.addEventListener('DOMContentLoaded', () => {
       initSchedule();
@@ -84,29 +93,51 @@
       await fetchScheduleLocally();
     }
 
+    // Пробует сначала текущий день, а при 404 скачивает файл за предыдущие дни (fallback до 5 дней назад)
     async function fetchScheduleLocally() {
-      updateStatus("Скачивание файла...");
-      try {
-        const url = CORS_PROXY + encodeURIComponent(SCHEDULE_FILE_URL) + `&_t=${Date.now()}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        const blob = await res.blob();
-        const reader = new FileReader();
-        reader.onload = function(e) {
-          const base64 = e.target.result;
-          try {
-            localStorage.setItem('phystech_schedule_base64', base64);
-            localStorage.setItem('phystech_schedule_last_fetch', Date.now().toString());
-          } catch(err) {}
-          updateStatus("Обновлено только что");
-          parseBase64Data(base64);
-        };
-        reader.readAsDataURL(blob);
-      } catch(err) {
+      updateStatus("Скачивание актуального файла...");
+      
+      let success = false;
+      const today = new Date();
+
+      for (let offset = 0; offset < 5; offset++) {
+        const targetDate = new Date(today);
+        targetDate.setDate(today.getDate() - offset);
+        
+        const fileUrl = buildDynamicScheduleUrl(targetDate);
+        const proxyUrl = CORS_PROXY + encodeURIComponent(fileUrl) + `&_t=${Date.now()}`;
+
+        try {
+          const res = await fetch(proxyUrl);
+          if (res.ok) {
+            const blob = await res.blob();
+            await new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onload = function(e) {
+                const base64 = e.target.result;
+                try {
+                  localStorage.setItem('phystech_schedule_base64', base64);
+                  localStorage.setItem('phystech_schedule_last_fetch', Date.now().toString());
+                } catch(err) {}
+                updateStatus("Обновлено только что");
+                parseBase64Data(base64);
+                resolve();
+              };
+              reader.readAsDataURL(blob);
+            });
+            success = true;
+            break;
+          }
+        } catch(err) {
+          // Игнорируем ошибку и пробуем предыдущую дату
+        }
+      }
+
+      if (!success) {
         updateStatus("Ошибка сети, загрузка из памяти");
         const cached = localStorage.getItem('phystech_schedule_base64');
         if (cached) parseBase64Data(cached);
-        else renderEmpty("Не удалось загрузить данные и нет локальной копии.");
+        else renderEmpty("Не удалось найти актуальный файл расписания.");
       }
     }
 
