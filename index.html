@@ -299,3 +299,197 @@
 </body>
 </html>
 
+        if (cached) parseBase64Data(cached);
+        else renderEmpty("Не удалось загрузить данные и нет локальной копии.");
+      }
+    }
+
+    function parseBase64Data(base64Data) {
+      try {
+        const cleanStr = base64Data.split(',')[1] || base64Data;
+        const wb = XLSX.read(cleanStr, { type: 'base64' });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rawRows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+        cleanAndBuildSchedule(rawRows);
+      } catch(err) {
+        renderEmpty("Ошибка парсинга таблицы Excel.");
+      }
+    }
+
+    function cleanAndBuildSchedule(rows) {
+      parsedSchedule = {};
+      if (!rows || rows.length < 2) return;
+
+      const headerRow = rows[0] || [];
+      const groupCols = [];
+
+      for (let c = 3; c < headerRow.length; c++) {
+        const val = headerRow[c] ? String(headerRow[c]).trim() : '';
+        if (val && val.length > 2) {
+          const gName = val.replace(/группа/gi, '').trim();
+          groupCols.push({ col: c, name: gName });
+          if (!parsedSchedule[gName]) {
+            parsedSchedule[gName] = { 'пн': [], 'вт': [], 'ср': [], 'чт': [], 'пт': [] };
+          }
+        }
+      }
+
+      let currentDay = 'пн';
+
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (!row || row.length === 0) continue;
+
+        const dayRaw = row[0] ? String(row[0]).trim().toLowerCase() : '';
+        if (dayRaw.startsWith('пн') || dayRaw.startsWith('пон')) currentDay = 'пн';
+        else if (dayRaw.startsWith('вт')) currentDay = 'вт';
+        else if (dayRaw.startsWith('ср')) currentDay = 'ср';
+        else if (dayRaw.startsWith('чт')) currentDay = 'чт';
+        else if (dayRaw.startsWith('пт')) currentDay = 'пт';
+
+        const timeStr = row[2] ? String(row[2]).trim() : '';
+        if (!timeStr || row[1] === 'перерыв') continue;
+
+        const tParts = timeStr.split(/[-–—]/).map(t => t.trim());
+        const startTime = tParts[0] || '';
+        const endTime = tParts[1] || '';
+
+        groupCols.forEach(g => {
+          const cell = row[g.col] ? String(row[g.col]).trim() : '';
+          if (!cell) return;
+
+          const parts = cell.split('/').map(p => p.trim());
+          const subject = parts[0] ? parts[0].toUpperCase() : '';
+          const teacher = parts[1] || '';
+          const roomRaw = parts[2] || '';
+          const room = (!roomRaw || roomRaw.toLowerCase().includes('нет')) ? '' : `КАБ. ${roomRaw}`;
+
+          if (subject) {
+            parsedSchedule[g.name][currentDay].push({
+              subject, teacher, startTime, endTime, room,
+              time: `${startTime} - ${endTime}`,
+              breakNote: null
+            });
+          }
+        });
+      }
+
+      for (const g in parsedSchedule) {
+        for (const d in parsedSchedule[g]) {
+          const list = parsedSchedule[g][d];
+          const combined = [];
+          let i = 0;
+          while (i < list.length) {
+            const curr = list[i];
+            const next = list[i + 1];
+            if (next && curr.subject === next.subject && curr.teacher === next.teacher) {
+              combined.push({
+                subject: curr.subject,
+                teacher: curr.teacher,
+                startTime: curr.startTime,
+                endTime: next.endTime,
+                time: `${curr.startTime} - ${next.endTime}`,
+                breakNote: `ПЕРЕРЫВ: ${curr.endTime} - ${next.startTime}`,
+                room: curr.room || next.room
+              });
+              i += 2;
+            } else {
+              combined.push(curr);
+              i += 1;
+            }
+          }
+          parsedSchedule[g][d] = combined;
+        }
+      }
+
+      const availableGroups = Object.keys(parsedSchedule).sort((a,b) => a.localeCompare(b, 'ru', {numeric: true}));
+      buildGroupModal(availableGroups);
+
+      if (!selectedGroup || !parsedSchedule[selectedGroup]) {
+        selectedGroup = availableGroups.includes('ИС-51') ? 'ИС-51' : (availableGroups[0] || '');
+        localStorage.setItem('phystech_selected_group', selectedGroup);
+      }
+
+      document.getElementById('groupTrigger').textContent = selectedGroup ? `ГРУППА: ${selectedGroup}` : 'Выберите группу';
+      renderSchedule();
+    }
+
+    function buildGroupModal(groups) {
+      const container = document.getElementById('groupList');
+      container.innerHTML = '';
+      groups.forEach(g => {
+        const item = document.createElement('div');
+        item.className = 'group-item';
+        item.textContent = g;
+        item.onclick = () => {
+          selectedGroup = g;
+          localStorage.setItem('phystech_selected_group', g);
+          document.getElementById('groupTrigger').textContent = `ГРУППА: ${g}`;
+          closeGroupModal();
+          renderSchedule();
+        };
+        container.appendChild(item);
+      });
+    }
+
+    function renderSchedule() {
+      const container = document.getElementById('scheduleContainer');
+      container.innerHTML = '';
+
+      if (!selectedGroup || !parsedSchedule[selectedGroup]) {
+        renderEmpty("Выберите группу для отображения расписания.");
+        return;
+      }
+
+      const daysData = parsedSchedule[selectedGroup];
+      let hasData = false;
+
+      for (const dayKey in DAY_MAP) {
+        const lessons = daysData[dayKey] || [];
+        if (lessons.length === 0) continue;
+        hasData = true;
+
+        const card = document.createElement('div');
+        card.className = 'day-card';
+        card.innerHTML = `<div class="day-title">${DAY_MAP[dayKey]}</div>`;
+
+        lessons.forEach(l => {
+          const lesEl = document.createElement('div');
+          lesEl.className = 'lesson';
+          lesEl.innerHTML = `
+            <div class="lesson-time">${l.time}</div>
+            <div class="lesson-subject">${l.subject}</div>
+            <div class="lesson-meta">
+              <span>${l.teacher}</span>
+              <span>${l.room}</span>
+            </div>
+            ${l.breakNote ? `<div class="break-note">${l.breakNote}</div>` : ''}
+          `;
+          card.appendChild(lesEl);
+        });
+
+        container.appendChild(card);
+      }
+
+      if (!hasData) renderEmpty("Для данной группы нет занятий на текущую неделю.");
+    }
+
+    function renderEmpty(msg) {
+      document.getElementById('scheduleContainer').innerHTML = `<div class="empty-state"><code>${msg}</code></div>`;
+    }
+
+    function updateStatus(txt) {
+      document.getElementById('status').textContent = txt;
+    }
+
+    function openGroupModal() {
+      document.getElementById('groupModal').style.display = 'flex';
+    }
+
+    function closeGroupModal() {
+      document.getElementById('groupModal').style.display = 'none';
+    }
+  </script>
+</body>
+</html>
+
